@@ -5,11 +5,13 @@ const { default: axios } = require('axios');
 const AWS = require('aws-sdk');
 const { Queue } = require('bullmq');
 const fs = require('fs');
+const cors =require('cors')
 require('dotenv').config();
 const bodyParser = require('body-parser');
 
 const app = express();
 const upload = multer({ dest: 'uploads/' });
+app.use(cors())
 
 AWS.config.update({
   accessKeyId: process.env.AWS_ACCESS_KEY_ID,
@@ -59,12 +61,11 @@ app.post('/projects', upload.single('file'), async (req, res) => {
       [title, description, s3Result.Location, 'processing']
     );
     const project = result.rows[0];
-    console.log(project.file_path)
+
 
    const job= await pdfQueue.add('processPDF', { filePathOrUrl: project.file_path, projectId: project.id },{ removeOnComplete: 1000, removeOnFail: 5000 });
 
-   console.log(job)
-   
+
     res.status(201).json(project);
   } catch (error) {
     console.error('Error creating project:', error);
@@ -84,46 +85,83 @@ app.get('/projects', async (req, res) => {
   }
 });
 
+
+const getQueryEmbedding = async (query) => {
+  const response = await axios.post(
+    'https://api.openai.com/v1/embeddings',
+    {
+      model: 'text-embedding-ada-002',
+      input: query,
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.OPEN_AI}`,
+      },
+    }
+  );
+  return response.data.data[0].embedding;
+};
+
+
+
+// Function to calculate cosine similarity
+function cosineSimilarity(vec1, vec2) {
+  console.log('vec1:', vec1);
+  console.log('vec2:', vec2);
+
+  if (!Array.isArray(vec1) || !Array.isArray(vec2)) {
+    throw new Error('Vectors must be arrays');
+  }
+
+  const dotProduct = vec1.reduce((acc, v, i) => acc + v * vec2[i], 0);
+  const magnitudeA = Math.sqrt(vec1.reduce((acc, v) => acc + v * v, 0));
+  const magnitudeB = Math.sqrt(vec2.reduce((acc, v) => acc + v * v, 0));
+
+  return dotProduct / (magnitudeA * magnitudeB);
+}
+
+
 app.post('/projects/:id/chat', async (req, res) => {
   const { id } = req.params;
   const { query } = req.body;
 
   try {
+    const queryEmbedding = await getQueryEmbedding(query);
+
     const result = await pool.query('SELECT embeddings FROM projects WHERE id = $1', [id]);
     const embeddings = result.rows[0].embeddings;
+    console.log(embeddings)
+    if (!Array.isArray(embeddings)) {
+      throw new Error('Embeddings must be an array');
+    }
+    const context = embeddings.join(' ');
 
-    const response = await getChatResponse(query, embeddings);
-    res.json({ response });
-  } catch (error) {
-    console.error('Error fetching chat response:', error);
-    res.status(500).json({ error: 'Failed to fetch chat response' });
-  }
-});
-
-const getChatResponse = async (query, embeddings) => {
-  try {
-    const prompt = `Please summarize the ${query} and use the following embeddings to answer the question:\n\nEmbeddings: ${JSON.stringify(embeddings)}\n\nQuestion: ${query}\n\nAnswer:`;
+    const prompt = `Use the following context to answer the question:\n\nContext: ${context}\n\nQuestion: ${query}\n\nAnswer:`;
 
     const response = await axios.post(
       'https://api.openai.com/v1/completions',
       {
-        model: 'text-davinci-003',
-        prompt: prompt
+        model: 'gpt-3.5-turbo-instruct',
+        prompt: prompt,
+        max_tokens: 1000, // Adjust this based on your needs
       },
       {
         headers: {
-          'Authorization': `Bearer ${process.env.OPEN_AI}`,
-          'Content-Type': 'application/json'
-        }
+          Authorization: `Bearer ${process.env.OPEN_AI}`,
+          'Content-Type': 'application/json',
+        },
       }
     );
 
-    return response.data.choices[0].text.trim();
+    res.json({ response: response.data.choices[0].text.trim() });
   } catch (error) {
-    console.error('Error generating chat response:', error);
-    return 'Error generating response';
+    console.error('Error fetching chat response:', error.response ? error.response.data : error.message);
+    res.status(500).json({ error: 'Failed to fetch chat response' });
   }
-};
+});
+
+
+
 
 app.listen(5000, () => {
   console.log('Server is running on port 5000');
