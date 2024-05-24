@@ -7,21 +7,25 @@ const { Pool } = require('pg');
 const redisConnection = new IORedis({
   host: process.env.REDIS_HOST || 'localhost',
   port: process.env.REDIS_PORT || 6379,
+  maxRetriesPerRequest: null,
 });
 
 const pool = new Pool({
   user: process.env.POSTGRES_USER || 'root',
   host: process.env.POSTGRES_HOST || 'localhost',
-  database: process.env.POSTGRES_DB || 'pdf',
+  database: process.env.POSTGRES_DB || 'postgres',
   password: process.env.POSTGRES_PASSWORD || 'root',
   port: process.env.POSTGRES_PORT || 5432,
 });
 
-const worker = new Worker('pdf-processing', async (job) => {
-  const { projectId, filePath } = job.data;
+const worker = new Worker('pdfQueue', async (job) => {
+  console.log("worker started ")
+  const { projectId, filePathOrUrl } = job.data;
   try {
-    const embeddings = await processPDF(filePath);
-    await pool.query('UPDATE projects SET embeddings = $1, status = $2 WHERE id = $3', [embeddings, 'created', projectId]);
+    const embeddings = await processPDF(filePathOrUrl);
+    const embeddingJson=JSON.stringify(embeddings)
+    console.log(embeddingJson)
+    await pool.query('UPDATE projects SET embeddings = $1, status = $2 WHERE id = $3', [embeddingJson, 'created', projectId]);
   } catch (error) {
     await pool.query('UPDATE projects SET status = $1 WHERE id = $2', ['failed', projectId]);
     console.error('Error processing PDF:', error);
